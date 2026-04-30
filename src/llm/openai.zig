@@ -1,10 +1,10 @@
 //! OpenAI-compatible LLM client implementation.
 //!
-//! JSON serialization uses the `serde` library for robust parsing and
-//! zero-copy borrowed deserialization of response content.
+//! Uses only the Zig standard library for JSON serialization — no external
+//! dependencies. Request JSON is streamed directly to the HTTP body writer;
+//! response parsing uses `std.json.Parsed` for automatic arena management.
 
 const std = @import("std");
-const serde = @import("serde");
 const core = @import("../core/types.zig");
 const ModelProvider = @import("provider.zig").ModelProvider;
 
@@ -15,6 +15,7 @@ const FinishReason = core.FinishReason;
 const Usage = core.Usage;
 const LLMResponse = core.LLMResponse;
 const LLMError = core.LLMError;
+
 /// Default OpenAI API base URL. The `/v1/chat/completions` path is appended
 /// automatically in `complete()`.
 pub const DEFAULT_BASE_URL = "https://api.openai.com";
@@ -23,10 +24,6 @@ pub const DEFAULT_BASE_URL = "https://api.openai.com";
 pub const DEFAULT_MODEL = "gpt-4o";
 
 /// OpenAI-compatible chat completions client.
-///
-/// Wraps `std.http.Client` to communicate with OpenAI or any API that
-/// implements the same chat completions protocol (e.g. local vLLM, Ollama
-/// with the OpenAI compatibility layer).
 pub const OpenAI = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -34,12 +31,6 @@ pub const OpenAI = struct {
     model: []const u8,
     base_url: []const u8,
 
-    /// Create a new OpenAI client.
-    ///
-    /// In tests, pass `std.testing.io`. In production, pass `init.io`
-    /// from `std.process.Init`.
-    /// `model` defaults to "gpt-4o". `base_url` defaults to the official
-    /// OpenAI API endpoint. Pass a custom URL to target compatible services.
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -56,13 +47,9 @@ pub const OpenAI = struct {
         };
     }
 
-    /// No-op; the HTTP client is created per-request.
     pub fn deinit(_: *OpenAI) void {}
 
     /// Execute a chat completion request.
-    ///
-    /// Satisfies the `ModelProvider` vtable interface. Use
-    /// `ModelProvider.init(&openai)` to get a runtime-polymorphic wrapper.
     pub fn complete(
         self: *OpenAI,
         allocator: std.mem.Allocator,
@@ -71,16 +58,14 @@ pub const OpenAI = struct {
     ) LLMError!LLMResponse {
         if (messages.len == 0) return LLMError.InvalidInput;
 
-        // Construct the full endpoint URL.
+        // URL and auth header.
         var url_buf: [2048]u8 = undefined;
         const endpoint = std.fmt.bufPrint(&url_buf, "{s}/v1/chat/completions", .{self.base_url}) catch return LLMError.InvalidInput;
         const uri = std.Uri.parse(endpoint) catch return LLMError.InvalidInput;
 
-        // Build the Authorization header.
         var auth_buf: [512]u8 = undefined;
         const bearer = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{self.api_key}) catch return LLMError.InvalidInput;
 
-        // Prepare the request payload.
         const payload = RequestBody{
             .model = self.model,
             .messages = messages,
@@ -91,8 +76,7 @@ pub const OpenAI = struct {
             .seed = opts.seed,
         };
 
-        // Send HTTP request — stream JSON directly to the body writer
-        // without allocating the full JSON string.
+        // Stream JSON directly to the HTTP body writer — no allocation.
         var http: std.http.Client = .{ .allocator = allocator, .io = self.io };
         defer http.deinit();
 
@@ -107,10 +91,11 @@ pub const OpenAI = struct {
         req.transfer_encoding = .chunked;
         var io_buf: [4096]u8 = undefined;
         var bw = req.sendBodyUnflushed(&io_buf) catch return LLMError.NetworkError;
-        serde.json.toWriter(&bw.writer, payload) catch return LLMError.NetworkError;
+        std.json.Stringify.value(payload, .{ .emit_null_optional_fields = false }, &bw.writer) catch return LLMError.NetworkError;
         bw.end() catch return LLMError.NetworkError;
         req.connection.?.flush() catch return LLMError.NetworkError;
 
+        // Receive response.
         var redirect_buf: [4096]u8 = undefined;
         var response = req.receiveHead(&redirect_buf) catch return LLMError.NetworkError;
 
@@ -127,8 +112,7 @@ pub const OpenAI = struct {
             };
         }
 
-        // Parse response — arena holds serde's temporary allocations,
-        // result_alloc owns the returned LLMResponse.
+        // Read response body into a temporary buffer, then parse.
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const arena_alloc = arena.allocator();
@@ -136,15 +120,14 @@ pub const OpenAI = struct {
         var transfer_buf: [4096]u8 = undefined;
         const body_bytes = response.reader(&transfer_buf).allocRemaining(arena_alloc, @enumFromInt(64 * 1024)) catch return LLMError.NetworkError;
 
-        return parseResponse(allocator, arena_alloc, body_bytes);
+        return parseResponse(allocator, body_bytes);
     }
 };
 
 // ---------------------------------------------------------------------------
-// JSON — request serialization (serde)
+// JSON request body
 // ---------------------------------------------------------------------------
 
-/// Shape of the chat completion request body sent to the API.
 const RequestBody = struct {
     model: []const u8,
     messages: []const ChatMessage,
@@ -155,7 +138,8 @@ const RequestBody = struct {
     seed: ?u32 = null,
 };
 
-/// Serialize a chat completion request to JSON using serde.
+/// Serialize a chat completion request to JSON.
+/// Exposed for testing; `complete()` streams JSON directly to the HTTP writer.
 pub fn buildRequestBody(
     allocator: std.mem.Allocator,
     model: []const u8,
@@ -171,62 +155,54 @@ pub fn buildRequestBody(
         .stop = opts.stop,
         .seed = opts.seed,
     };
-    return serde.json.toSlice(allocator, payload) catch return LLMError.InvalidInput;
+    return std.json.Stringify.valueAlloc(allocator, payload, .{ .emit_null_optional_fields = false }) catch return LLMError.InvalidInput;
 }
 
 // ---------------------------------------------------------------------------
-// JSON — response deserialization (serde)
+// JSON response parsing
 // ---------------------------------------------------------------------------
 
-/// Matches the "usage" object in OpenAI responses.
-const ResponseUsage = struct {
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    total_tokens: u32,
-};
-
-/// Matches a single "choice" in OpenAI responses.
-const ResponseChoice = struct {
-    message: struct {
-        content: []const u8,
-    },
-    finish_reason: []const u8 = "stop",
-};
-
-/// Top-level OpenAI chat completion response.
+/// Matches the OpenAI chat completions response shape.
+/// `std.json.Parsed` manages an internal arena — no scratch allocator needed.
 const ResponseBody = struct {
-    choices: []const ResponseChoice,
-    usage: ?ResponseUsage = null,
+    choices: []struct {
+        message: struct {
+            content: []const u8,
+        },
+        finish_reason: []const u8 = "stop",
+    },
+    usage: ?struct {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        total_tokens: u32,
+    } = null,
 };
 
 /// Parse a successful (HTTP 200) OpenAI response body into an `LLMResponse`.
 ///
-/// `scratch_alloc` is used for serde's internal allocations (freed by the
-/// caller after this function returns). `result_alloc` owns the returned
-/// `LLMResponse` fields.
-pub fn parseResponse(
-    result_alloc: std.mem.Allocator,
-    scratch_alloc: std.mem.Allocator,
-    body: []const u8,
-) LLMError!LLMResponse {
-    const parsed = serde.json.fromSlice(ResponseBody, scratch_alloc, body) catch {
+/// Uses `std.json.Parsed` for internal arena management — only the returned
+/// fields are duped to `allocator`. The caller owns the result.
+pub fn parseResponse(allocator: std.mem.Allocator, body: []const u8) LLMError!LLMResponse {
+    var parsed = std.json.parseFromSlice(ResponseBody, allocator, body, .{ .ignore_unknown_fields = true }) catch {
         return LLMError.ParseError;
     };
+    defer parsed.deinit();
 
-    if (parsed.choices.len == 0) return LLMError.UnexpectedResponse;
+    const choices = parsed.value.choices;
+    if (choices.len == 0) return LLMError.UnexpectedResponse;
 
-    var choices = result_alloc.alloc(LLMResponse.Choice, parsed.choices.len) catch return LLMError.ParseError;
-    for (parsed.choices, 0..) |c, i| {
-        const content = result_alloc.dupe(u8, c.message.content) catch return LLMError.ParseError;
-        choices[i] = .{
+    var result_choices = allocator.alloc(LLMResponse.Choice, choices.len) catch return LLMError.ParseError;
+    for (choices, 0..) |c, i| {
+        const content = allocator.dupe(u8, c.message.content) catch return LLMError.ParseError;
+        result_choices[i] = .{
             .message = .{ .content = content },
             .finish_reason = parseFinishReason(c.finish_reason),
         };
     }
 
     return LLMResponse{
-        .choices = choices,
-        .usage = if (parsed.usage) |u| Usage{
+        .choices = result_choices,
+        .usage = if (parsed.value.usage) |u| Usage{
             .prompt_tokens = u.prompt_tokens,
             .completion_tokens = u.completion_tokens,
             .total_tokens = u.total_tokens,
@@ -234,7 +210,6 @@ pub fn parseResponse(
     };
 }
 
-/// Map a string finish reason to the enum.
 fn parseFinishReason(raw: []const u8) FinishReason {
     if (std.mem.eql(u8, raw, "stop")) return .stop;
     if (std.mem.eql(u8, raw, "length")) return .length;
@@ -252,9 +227,7 @@ test "buildRequestBody - minimal" {
     const json = try buildRequestBody(allocator, "gpt-4o", &.{}, .{});
     defer allocator.free(json);
 
-    // Should contain the model field.
     try std.testing.expect(std.mem.indexOf(u8, json, "\"model\":\"gpt-4o\"") != null);
-    // Should contain empty messages array.
     try std.testing.expect(std.mem.indexOf(u8, json, "\"messages\":[]") != null);
 }
 
@@ -280,7 +253,7 @@ test "buildRequestBody - full options" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"seed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"system\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"user\"") != null);
-    // With serde, null optional fields appear as "field":null in the JSON.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"stop\"") == null);
 }
 
 test "buildRequestBody - with stop sequences" {
@@ -321,9 +294,7 @@ test "parseResponse - valid response" {
         \\}
     ;
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const resp = try parseResponse(allocator, arena.allocator(), body);
+    const resp = try parseResponse(allocator, body);
     defer resp.deinit(allocator);
 
     try std.testing.expectEqualStrings("Hello! How can I help?", resp.choices[0].message.content);
@@ -348,9 +319,7 @@ test "parseResponse - missing usage" {
         \\}
     ;
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const resp = try parseResponse(allocator, arena.allocator(), body);
+    const resp = try parseResponse(allocator, body);
     defer resp.deinit(allocator);
 
     try std.testing.expectEqualStrings("Hi", resp.choices[0].message.content);
@@ -360,61 +329,38 @@ test "parseResponse - missing usage" {
 
 test "parseResponse - empty choices" {
     const allocator = std.testing.allocator;
-    const body = "{\"choices\":[]}";
-
-    var arena2 = std.heap.ArenaAllocator.init(allocator);
-    defer arena2.deinit();
-    try std.testing.expectError(LLMError.UnexpectedResponse, parseResponse(allocator, arena2.allocator(), body));
+    try std.testing.expectError(LLMError.UnexpectedResponse, parseResponse(allocator, "{\"choices\":[]}"));
 }
 
 test "parseResponse - invalid JSON" {
     const allocator = std.testing.allocator;
-
-    var arena_invalid = std.heap.ArenaAllocator.init(allocator);
-    defer arena_invalid.deinit();
-    try std.testing.expectError(LLMError.ParseError, parseResponse(allocator, arena_invalid.allocator(), "not json"));
+    try std.testing.expectError(LLMError.ParseError, parseResponse(allocator, "not json"));
 }
 
 test "parseResponse - finish_reason mapping" {
     const allocator = std.testing.allocator;
 
     {
-        const body =
-            \\{"choices":[{"message":{"content":"x"},"finish_reason":"stop"}]}
-        ;
-        var arena1 = std.heap.ArenaAllocator.init(allocator);
-        defer arena1.deinit();
-        const resp = try parseResponse(allocator, arena1.allocator(), body);
+        const body = "{\"choices\":[{\"message\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}";
+        const resp = try parseResponse(allocator, body);
         defer resp.deinit(allocator);
         try std.testing.expectEqual(FinishReason.stop, resp.choices[0].finish_reason);
     }
     {
-        const body =
-            \\{"choices":[{"message":{"content":"x"},"finish_reason":"tool_calls"}]}
-        ;
-        var arena2 = std.heap.ArenaAllocator.init(allocator);
-        defer arena2.deinit();
-        const resp = try parseResponse(allocator, arena2.allocator(), body);
+        const body = "{\"choices\":[{\"message\":{\"content\":\"x\"},\"finish_reason\":\"tool_calls\"}]}";
+        const resp = try parseResponse(allocator, body);
         defer resp.deinit(allocator);
         try std.testing.expectEqual(FinishReason.tool_calls, resp.choices[0].finish_reason);
     }
     {
-        const body =
-            \\{"choices":[{"message":{"content":"x"},"finish_reason":"content_filter"}]}
-        ;
-        var arena3 = std.heap.ArenaAllocator.init(allocator);
-        defer arena3.deinit();
-        const resp = try parseResponse(allocator, arena3.allocator(), body);
+        const body = "{\"choices\":[{\"message\":{\"content\":\"x\"},\"finish_reason\":\"content_filter\"}]}";
+        const resp = try parseResponse(allocator, body);
         defer resp.deinit(allocator);
         try std.testing.expectEqual(FinishReason.content_filter, resp.choices[0].finish_reason);
     }
     {
-        const body =
-            \\{"choices":[{"message":{"content":"x"},"finish_reason":"random_new"}]}
-        ;
-        var arena4 = std.heap.ArenaAllocator.init(allocator);
-        defer arena4.deinit();
-        const resp = try parseResponse(allocator, arena4.allocator(), body);
+        const body = "{\"choices\":[{\"message\":{\"content\":\"x\"},\"finish_reason\":\"random_new\"}]}";
+        const resp = try parseResponse(allocator, body);
         defer resp.deinit(allocator);
         try std.testing.expectEqual(FinishReason.unknown, resp.choices[0].finish_reason);
     }
@@ -423,7 +369,6 @@ test "parseResponse - finish_reason mapping" {
 test "OpenAI.init defaults" {
     const allocator = std.testing.allocator;
     const oa = OpenAI.init(allocator, std.testing.io, "sk-test-key", null, null);
-
     try std.testing.expectEqualStrings("sk-test-key", oa.api_key);
     try std.testing.expectEqualStrings(DEFAULT_MODEL, oa.model);
     try std.testing.expectEqualStrings(DEFAULT_BASE_URL, oa.base_url);
@@ -432,7 +377,6 @@ test "OpenAI.init defaults" {
 test "OpenAI.init custom model and url" {
     const allocator = std.testing.allocator;
     const oa = OpenAI.init(allocator, std.testing.io, "sk-custom", "gpt-3.5-turbo", "https://custom.api/v1");
-
     try std.testing.expectEqualStrings("gpt-3.5-turbo", oa.model);
     try std.testing.expectEqualStrings("https://custom.api/v1", oa.base_url);
 }
@@ -441,10 +385,8 @@ test "ModelProvider.init wraps OpenAI correctly" {
     const allocator = std.testing.allocator;
     var oa = OpenAI.init(allocator, std.testing.io, "sk-test", null, null);
     const provider = ModelProvider.init(&oa);
-
-    // Verify the vtable wraps the correct pointer.
     try std.testing.expect(@intFromPtr(provider.ptr) == @intFromPtr(&oa));
 }
 
-// Integration tests moved to src/llm/openai_integration.zig.
-// Run with: zig build integration-test -Dapi-key=sk-xxx
+// Integration tests: src/llm/openai_integration.zig
+// Run: zig build integration-test

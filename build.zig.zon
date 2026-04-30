@@ -31,12 +31,7 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
-    .dependencies = .{
-        .serde = .{
-            .url = "git+https://github.com/OrlovEvgeny/serde.zig#f6a4aba801b394bbd470bd88692c566b47768626",
-            .hash = "serde-1.0.1-1DszTwTrCwBUaGX9N1gxRUo9PKpARXste7wzAr3ybjAd",
-        },
-    },
+    .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",

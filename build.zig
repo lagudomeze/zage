@@ -28,17 +28,9 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    const serde_dep = b.dependency("serde", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
     const mod = b.addModule("zage", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .imports = &.{
-            .{ .name = "serde", .module = serde_dep.module("serde") },
-        },
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -74,7 +66,6 @@ pub fn build(b: *std.Build) void {
             // root module.
             .imports = &.{
                 .{ .name = "zage", .module = mod },
-                .{ .name = "serde", .module = serde_dep.module("serde") },
             },
         }),
     });
