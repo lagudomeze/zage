@@ -71,11 +71,7 @@ pub const OpenAI = struct {
     ) LLMError!LLMResponse {
         if (messages.len == 0) return LLMError.InvalidInput;
 
-        // Build JSON request body.
-        const req_json = try buildRequestBody(allocator, self.model, messages, opts);
-        defer allocator.free(req_json);
-
-        // Construct the full endpoint URL: {base_url}/v1/chat/completions.
+        // Construct the full endpoint URL.
         var url_buf: [2048]u8 = undefined;
         const endpoint = std.fmt.bufPrint(&url_buf, "{s}/v1/chat/completions", .{self.base_url}) catch return LLMError.InvalidInput;
         const uri = std.Uri.parse(endpoint) catch return LLMError.InvalidInput;
@@ -84,7 +80,19 @@ pub const OpenAI = struct {
         var auth_buf: [512]u8 = undefined;
         const bearer = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{self.api_key}) catch return LLMError.InvalidInput;
 
-        // Send HTTP request.
+        // Prepare the request payload.
+        const payload = RequestBody{
+            .model = self.model,
+            .messages = messages,
+            .temperature = opts.temperature,
+            .max_tokens = opts.max_tokens,
+            .top_p = opts.top_p,
+            .stop = opts.stop,
+            .seed = opts.seed,
+        };
+
+        // Send HTTP request — stream JSON directly to the body writer
+        // without allocating the full JSON string.
         var http: std.http.Client = .{ .allocator = allocator, .io = self.io };
         defer http.deinit();
 
@@ -96,13 +104,17 @@ pub const OpenAI = struct {
         }) catch return LLMError.NetworkError;
         defer req.deinit();
 
-        req.sendBodyComplete(req_json) catch return LLMError.NetworkError;
+        req.transfer_encoding = .chunked;
+        var io_buf: [4096]u8 = undefined;
+        var bw = req.sendBodyUnflushed(&io_buf) catch return LLMError.NetworkError;
+        serde.json.toWriter(&bw.writer, payload) catch return LLMError.NetworkError;
+        bw.end() catch return LLMError.NetworkError;
+        req.connection.?.flush() catch return LLMError.NetworkError;
 
         var redirect_buf: [4096]u8 = undefined;
         var response = req.receiveHead(&redirect_buf) catch return LLMError.NetworkError;
 
         if (response.head.status != .ok) {
-            // Read error body into a stack buffer for logging.
             var err_buf: [4096]u8 = undefined;
             var transfer_buf: [1024]u8 = undefined;
             const err_len = response.reader(&transfer_buf).readSliceShort(&err_buf) catch 0;
@@ -115,30 +127,16 @@ pub const OpenAI = struct {
             };
         }
 
-        // Read the response body and parse it. Use an arena for the HTTP
-        // buffer and serde's temporary allocations, then dupe the result
-        // into the caller's allocator.
+        // Parse response — arena holds serde's temporary allocations,
+        // result_alloc owns the returned LLMResponse.
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const arena_alloc = arena.allocator();
 
-        const max_body: usize = if (response.head.content_length) |cl|
-            @intCast(cl)
-        else
-            64 * 1024;
-        var resp_body: std.ArrayList(u8) = .empty;
-        defer resp_body.deinit(arena_alloc);
-        resp_body.ensureTotalCapacityPrecise(arena_alloc, max_body) catch return LLMError.NetworkError;
-
         var transfer_buf: [4096]u8 = undefined;
-        var body_reader = response.reader(&transfer_buf);
-        while (true) {
-            const n = body_reader.readSliceShort(resp_body.unusedCapacitySlice()) catch return LLMError.NetworkError;
-            if (n == 0) break;
-            resp_body.items.len += n;
-        }
+        const body_bytes = response.reader(&transfer_buf).allocRemaining(arena_alloc, @enumFromInt(64 * 1024)) catch return LLMError.NetworkError;
 
-        return parseResponse(allocator, arena_alloc, resp_body.items);
+        return parseResponse(allocator, arena_alloc, body_bytes);
     }
 };
 
