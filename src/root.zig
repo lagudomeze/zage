@@ -18,12 +18,16 @@ pub const callback = @import("callback/events.zig");
 pub const ChatRole = core.ChatRole;
 pub const ChatMessage = core.ChatMessage;
 pub const ToolCall = core.ToolCall;
+pub const ToolDef = core.ToolDef;
 pub const AgentStep = core.AgentStep;
 pub const GenerationOptions = core.GenerationOptions;
 pub const FinishReason = core.FinishReason;
 pub const Usage = core.Usage;
 pub const LLMResponse = core.LLMResponse;
 pub const LLMError = core.LLMError;
+pub const EmbeddingRequest = core.EmbeddingRequest;
+pub const EmbeddingResponse = core.EmbeddingResponse;
+pub const ModelList = core.ModelList;
 pub const ModelProvider = llm.ModelProvider;
 pub const OpenAI = llm.OpenAI;
 

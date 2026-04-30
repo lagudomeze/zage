@@ -17,7 +17,9 @@ const ToolCall = core.ToolCall;
 const ToolDef = core.ToolDef;
 const EmbeddingRequest = core.EmbeddingRequest;
 const EmbeddingResponse = core.EmbeddingResponse;
+const Embedding = core.Embedding;
 const ModelList = core.ModelList;
+const Model = core.Model;
 const LLMResponse = core.LLMResponse;
 const LLMError = core.LLMError;
 
@@ -63,14 +65,6 @@ pub const OpenAI = struct {
     ) LLMError!LLMResponse {
         if (messages.len == 0) return LLMError.InvalidInput;
 
-        // URL and auth header.
-        var url_buf: [2048]u8 = undefined;
-        const endpoint = std.fmt.bufPrint(&url_buf, "{s}/v1/chat/completions", .{self.base_url}) catch return LLMError.InvalidInput;
-        const uri = std.Uri.parse(endpoint) catch return LLMError.InvalidInput;
-
-        var auth_buf: [512]u8 = undefined;
-        const bearer = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{self.api_key}) catch return LLMError.InvalidInput;
-
         const payload = RequestBody{
             .model = self.model,
             .messages = messages,
@@ -81,13 +75,41 @@ pub const OpenAI = struct {
             .seed = opts.seed,
         };
 
-        // Stream JSON directly to the HTTP body writer — no allocation.
+        const body = try self.doPost(allocator, "/v1/chat/completions", payload);
+        return parseResponse(allocator, body);
+    }
+
+    /// Create an embedding vector for the given input text.
+    pub fn createEmbedding(
+        self: *OpenAI,
+        allocator: std.mem.Allocator,
+        request: EmbeddingRequest,
+    ) LLMError!EmbeddingResponse {
+        const body = try self.doPost(allocator, "/v1/embeddings", request);
+        return parseEmbeddingResponse(allocator, body);
+    }
+
+    /// List all available models.
+    pub fn listModels(
+        self: *OpenAI,
+        allocator: std.mem.Allocator,
+    ) LLMError!ModelList {
+        const body = try self.doGet(allocator, "/v1/models");
+        return parseModelList(allocator, body);
+    }
+
+    // -- internal HTTP helpers ------------------------------------------------
+
+    fn doPost(self: *const OpenAI, allocator: std.mem.Allocator, path: []const u8, payload: anytype) LLMError![]u8 {
+        const uri = buildUri(self.base_url, path) catch return LLMError.InvalidInput;
+        const auth = buildAuthHeader(self.api_key) catch return LLMError.InvalidInput;
+
         var http: std.http.Client = .{ .allocator = allocator, .io = self.io };
         defer http.deinit();
 
         var req = http.request(.POST, uri, .{
             .headers = .{
-                .authorization = .{ .override = bearer },
+                .authorization = .{ .override = &auth },
                 .content_type = .{ .override = "application/json" },
             },
         }) catch return LLMError.NetworkError;
@@ -100,7 +122,27 @@ pub const OpenAI = struct {
         bw.end() catch return LLMError.NetworkError;
         req.connection.?.flush() catch return LLMError.NetworkError;
 
-        // Receive response.
+        return self.receiveResponse(allocator, &req);
+    }
+
+    fn doGet(self: *const OpenAI, allocator: std.mem.Allocator, path: []const u8) LLMError![]u8 {
+        const uri = buildUri(self.base_url, path) catch return LLMError.InvalidInput;
+        const auth = buildAuthHeader(self.api_key) catch return LLMError.InvalidInput;
+
+        var http: std.http.Client = .{ .allocator = allocator, .io = self.io };
+        defer http.deinit();
+
+        var req = http.request(.GET, uri, .{
+            .headers = .{ .authorization = .{ .override = &auth } },
+        }) catch return LLMError.NetworkError;
+        defer req.deinit();
+
+        req.sendBodiless() catch return LLMError.NetworkError;
+
+        return self.receiveResponse(allocator, &req);
+    }
+
+    fn receiveResponse(_: *const OpenAI, allocator: std.mem.Allocator, req: *std.http.Client.Request) LLMError![]u8 {
         var redirect_buf: [4096]u8 = undefined;
         var response = req.receiveHead(&redirect_buf) catch return LLMError.NetworkError;
 
@@ -117,41 +159,26 @@ pub const OpenAI = struct {
             };
         }
 
-        // Read response body into a temporary buffer, then parse.
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const arena_alloc = arena.allocator();
-
         var transfer_buf: [4096]u8 = undefined;
-        const body_bytes = response.reader(&transfer_buf).allocRemaining(arena_alloc, @enumFromInt(64 * 1024)) catch return LLMError.NetworkError;
-
-        return parseResponse(allocator, body_bytes);
-    }
-
-    /// Create an embedding vector for the given input text.
-    /// Uses the `/v1/embeddings` endpoint.
-    pub fn createEmbedding(
-        self: *OpenAI,
-        allocator: std.mem.Allocator,
-        request: EmbeddingRequest,
-    ) LLMError!EmbeddingResponse {
-        _ = self;
-        _ = allocator;
-        _ = request;
-        return error.ApiError; // TODO: implement
-    }
-
-    /// List all available models.
-    /// Uses the `/v1/models` endpoint.
-    pub fn listModels(
-        self: *OpenAI,
-        allocator: std.mem.Allocator,
-    ) LLMError!ModelList {
-        _ = self;
-        _ = allocator;
-        return error.ApiError; // TODO: implement
+        return response.reader(&transfer_buf).allocRemaining(arena.allocator(), @enumFromInt(64 * 1024)) catch return LLMError.NetworkError;
     }
 };
+
+// -- standalone helpers -------------------------------------------------------
+
+fn buildUri(base_url: []const u8, path: []const u8) !std.Uri {
+    var url_buf: [2048]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&url_buf, "{s}{s}", .{ base_url, path });
+    return std.Uri.parse(endpoint);
+}
+
+fn buildAuthHeader(api_key: []const u8) ![512]u8 {
+    var auth_buf: [512]u8 = undefined;
+    _ = try std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{api_key});
+    return auth_buf;
+}
 
 // ---------------------------------------------------------------------------
 // JSON request body
@@ -281,6 +308,93 @@ pub fn parseResponse(allocator: std.mem.Allocator, body: []const u8) LLMError!LL
         } else null,
     };
 }
+
+// ---------------------------------------------------------------------------
+// Embedding response parsing
+// ---------------------------------------------------------------------------
+
+const EmbeddingResponseBody = struct {
+    object: []const u8,
+    data: []struct {
+        index: u32,
+        embedding: []const f32,
+        object: []const u8,
+    },
+    model: []const u8,
+    usage: struct {
+        prompt_tokens: u32,
+        total_tokens: u32,
+    },
+};
+
+fn parseEmbeddingResponse(allocator: std.mem.Allocator, body: []const u8) LLMError!EmbeddingResponse {
+    var parsed = std.json.parseFromSlice(EmbeddingResponseBody, allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        return LLMError.ParseError;
+    };
+    defer parsed.deinit();
+
+    const v = parsed.value;
+    var data = allocator.alloc(Embedding, v.data.len) catch return LLMError.ParseError;
+    for (v.data, 0..) |e, i| {
+        const emb = allocator.alloc(f32, e.embedding.len) catch return LLMError.ParseError;
+        @memcpy(emb, e.embedding);
+        data[i] = .{
+            .index = e.index,
+            .embedding = emb,
+            .object = allocator.dupe(u8, e.object) catch return LLMError.ParseError,
+        };
+    }
+
+    return EmbeddingResponse{
+        .object = allocator.dupe(u8, v.object) catch return LLMError.ParseError,
+        .data = data,
+        .model = allocator.dupe(u8, v.model) catch return LLMError.ParseError,
+        .usage = .{
+            .prompt_tokens = v.usage.prompt_tokens,
+            .completion_tokens = 0,
+            .total_tokens = v.usage.total_tokens,
+        },
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Model list response parsing
+// ---------------------------------------------------------------------------
+
+const ModelListBody = struct {
+    object: []const u8,
+    data: []struct {
+        id: []const u8,
+        object: []const u8,
+        created: u64,
+        owned_by: []const u8,
+    },
+};
+
+fn parseModelList(allocator: std.mem.Allocator, body: []const u8) LLMError!ModelList {
+    var parsed = std.json.parseFromSlice(ModelListBody, allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        return LLMError.ParseError;
+    };
+    defer parsed.deinit();
+
+    const v = parsed.value;
+    var data = allocator.alloc(Model, v.data.len) catch return LLMError.ParseError;
+    for (v.data, 0..) |m, i| {
+        data[i] = .{
+            .id = allocator.dupe(u8, m.id) catch return LLMError.ParseError,
+            .object = allocator.dupe(u8, m.object) catch return LLMError.ParseError,
+            .created = m.created,
+            .owned_by = allocator.dupe(u8, m.owned_by) catch return LLMError.ParseError,
+        };
+    }
+
+    return ModelList{
+        .object = allocator.dupe(u8, v.object) catch return LLMError.ParseError,
+        .data = data,
+    };
+}
+
+// ---------------------------------------------------------------------------
 
 fn parseFinishReason(raw: []const u8) FinishReason {
     if (std.mem.eql(u8, raw, "stop")) return .stop;
