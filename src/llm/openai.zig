@@ -115,14 +115,20 @@ pub const OpenAI = struct {
             };
         }
 
-        // Read the response body. Most chat completions are < 64 KB.
+        // Read the response body and parse it. Use an arena for the HTTP
+        // buffer and serde's temporary allocations, then dupe the result
+        // into the caller's allocator.
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const arena_alloc = arena.allocator();
+
         const max_body: usize = if (response.head.content_length) |cl|
             @intCast(cl)
         else
             64 * 1024;
         var resp_body: std.ArrayList(u8) = .empty;
-        defer resp_body.deinit(allocator);
-        resp_body.ensureTotalCapacityPrecise(allocator, max_body) catch return LLMError.NetworkError;
+        defer resp_body.deinit(arena_alloc);
+        resp_body.ensureTotalCapacityPrecise(arena_alloc, max_body) catch return LLMError.NetworkError;
 
         var transfer_buf: [4096]u8 = undefined;
         var body_reader = response.reader(&transfer_buf);
@@ -132,7 +138,7 @@ pub const OpenAI = struct {
             resp_body.items.len += n;
         }
 
-        return parseResponse(allocator, resp_body.items);
+        return parseResponse(allocator, arena_alloc, resp_body.items);
     }
 };
 
@@ -197,22 +203,23 @@ const ResponseBody = struct {
 
 /// Parse a successful (HTTP 200) OpenAI response body into an `LLMResponse`.
 ///
-/// HTTP error status codes are handled in `complete()` before calling this.
-pub fn parseResponse(allocator: std.mem.Allocator, body: []const u8) LLMError!LLMResponse {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const arena_alloc = arena.allocator();
-
-    const parsed = serde.json.fromSlice(ResponseBody, arena_alloc, body) catch {
+/// `scratch_alloc` is used for serde's internal allocations (freed by the
+/// caller after this function returns). `result_alloc` owns the returned
+/// `LLMResponse` fields.
+pub fn parseResponse(
+    result_alloc: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    body: []const u8,
+) LLMError!LLMResponse {
+    const parsed = serde.json.fromSlice(ResponseBody, scratch_alloc, body) catch {
         return LLMError.ParseError;
     };
 
     if (parsed.choices.len == 0) return LLMError.UnexpectedResponse;
 
-    // Duplicate the content from the arena to the caller's allocator.
-    var choices = allocator.alloc(LLMResponse.Choice, parsed.choices.len) catch return LLMError.ParseError;
+    var choices = result_alloc.alloc(LLMResponse.Choice, parsed.choices.len) catch return LLMError.ParseError;
     for (parsed.choices, 0..) |c, i| {
-        const content = allocator.dupe(u8, c.message.content) catch return LLMError.ParseError;
+        const content = result_alloc.dupe(u8, c.message.content) catch return LLMError.ParseError;
         choices[i] = .{
             .message = .{ .content = content },
             .finish_reason = parseFinishReason(c.finish_reason),
@@ -316,7 +323,9 @@ test "parseResponse - valid response" {
         \\}
     ;
 
-    const resp = try parseResponse(allocator, body);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const resp = try parseResponse(allocator, arena.allocator(), body);
     defer resp.deinit(allocator);
 
     try std.testing.expectEqualStrings("Hello! How can I help?", resp.choices[0].message.content);
@@ -341,7 +350,9 @@ test "parseResponse - missing usage" {
         \\}
     ;
 
-    const resp = try parseResponse(allocator, body);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const resp = try parseResponse(allocator, arena.allocator(), body);
     defer resp.deinit(allocator);
 
     try std.testing.expectEqualStrings("Hi", resp.choices[0].message.content);
@@ -353,13 +364,17 @@ test "parseResponse - empty choices" {
     const allocator = std.testing.allocator;
     const body = "{\"choices\":[]}";
 
-    try std.testing.expectError(LLMError.UnexpectedResponse, parseResponse(allocator, body));
+    var arena2 = std.heap.ArenaAllocator.init(allocator);
+    defer arena2.deinit();
+    try std.testing.expectError(LLMError.UnexpectedResponse, parseResponse(allocator, arena2.allocator(), body));
 }
 
 test "parseResponse - invalid JSON" {
     const allocator = std.testing.allocator;
 
-    try std.testing.expectError(LLMError.ParseError, parseResponse(allocator, "not json"));
+    var arena_invalid = std.heap.ArenaAllocator.init(allocator);
+    defer arena_invalid.deinit();
+    try std.testing.expectError(LLMError.ParseError, parseResponse(allocator, arena_invalid.allocator(), "not json"));
 }
 
 test "parseResponse - finish_reason mapping" {
@@ -369,7 +384,9 @@ test "parseResponse - finish_reason mapping" {
         const body =
             \\{"choices":[{"message":{"content":"x"},"finish_reason":"stop"}]}
         ;
-        const resp = try parseResponse(allocator, body);
+        var arena1 = std.heap.ArenaAllocator.init(allocator);
+        defer arena1.deinit();
+        const resp = try parseResponse(allocator, arena1.allocator(), body);
         defer resp.deinit(allocator);
         try std.testing.expectEqual(FinishReason.stop, resp.choices[0].finish_reason);
     }
@@ -377,7 +394,9 @@ test "parseResponse - finish_reason mapping" {
         const body =
             \\{"choices":[{"message":{"content":"x"},"finish_reason":"tool_calls"}]}
         ;
-        const resp = try parseResponse(allocator, body);
+        var arena2 = std.heap.ArenaAllocator.init(allocator);
+        defer arena2.deinit();
+        const resp = try parseResponse(allocator, arena2.allocator(), body);
         defer resp.deinit(allocator);
         try std.testing.expectEqual(FinishReason.tool_calls, resp.choices[0].finish_reason);
     }
@@ -385,7 +404,9 @@ test "parseResponse - finish_reason mapping" {
         const body =
             \\{"choices":[{"message":{"content":"x"},"finish_reason":"content_filter"}]}
         ;
-        const resp = try parseResponse(allocator, body);
+        var arena3 = std.heap.ArenaAllocator.init(allocator);
+        defer arena3.deinit();
+        const resp = try parseResponse(allocator, arena3.allocator(), body);
         defer resp.deinit(allocator);
         try std.testing.expectEqual(FinishReason.content_filter, resp.choices[0].finish_reason);
     }
@@ -393,7 +414,9 @@ test "parseResponse - finish_reason mapping" {
         const body =
             \\{"choices":[{"message":{"content":"x"},"finish_reason":"random_new"}]}
         ;
-        const resp = try parseResponse(allocator, body);
+        var arena4 = std.heap.ArenaAllocator.init(allocator);
+        defer arena4.deinit();
+        const resp = try parseResponse(allocator, arena4.allocator(), body);
         defer resp.deinit(allocator);
         try std.testing.expectEqual(FinishReason.unknown, resp.choices[0].finish_reason);
     }

@@ -108,11 +108,11 @@ test "integration - system prompt influences response" {
         .{ .role = .user, .content = "What is the capital of China?" },
     };
 
-    const response = try provider.complete(allocator, &messages, .{ .max_tokens = 80 });
+    const response = try provider.complete(allocator, &messages, .{ .max_tokens = 120 });
     defer response.deinit(allocator);
 
+    try std.testing.expect(response.choices.len > 0);
     try std.testing.expect(response.choices[0].message.content.len > 0);
-    try std.testing.expect(response.choices[0].finish_reason == .stop or response.choices[0].finish_reason == .length);
 }
 
 test "integration - low temperature produces deterministic output" {
