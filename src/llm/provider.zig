@@ -61,10 +61,6 @@ pub const ModelProvider = struct {
         return self.vtable.complete(self.ptr, allocator, messages, opts);
     }
 };
-
-// Backward-compatible alias.
-pub const LLMClient = ModelProvider;
-
 test {
     _ = core;
 }

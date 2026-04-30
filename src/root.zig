@@ -25,7 +25,6 @@ pub const Usage = core.Usage;
 pub const LLMResponse = core.LLMResponse;
 pub const LLMError = core.LLMError;
 pub const ModelProvider = llm.ModelProvider;
-pub const LLMClient = llm.LLMClient;
 pub const OpenAI = llm.OpenAI;
 
 // Interface validation helpers.

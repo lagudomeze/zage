@@ -133,29 +133,6 @@ pub const LLMError = error{
     UnexpectedResponse,
 };
 
-/// Virtual-table based interface for LLM clients.
-///
-/// Follows the same pattern as `std.mem.Allocator`: a thin wrapper around a
-/// pointer and a vtable, allowing different implementations to share the same
-/// interface without dynamic dispatch overhead in hot paths.
-pub const LLMClient = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        /// Send chat messages to the LLM and receive a completion.
-        complete: *const fn (*anyopaque, allocator: std.mem.Allocator, messages: []const ChatMessage, opts: GenerationOptions) LLMError!LLMResponse,
-    };
-
-    /// Call the underlying LLM with the given messages and options.
-    ///
-    /// The caller owns all heap-allocated fields in `LLMResponse` (notably
-    /// `choices[].message.content`) and must free them with the same allocator.
-    pub fn complete(self: LLMClient, allocator: std.mem.Allocator, messages: []const ChatMessage, opts: GenerationOptions) LLMError!LLMResponse {
-        return self.vtable.complete(self.ptr, allocator, messages, opts);
-    }
-};
-
 test "ChatRole asStr returns correct strings" {
     try std.testing.expectEqualStrings("system", ChatRole.system.asStr());
     try std.testing.expectEqualStrings("user", ChatRole.user.asStr());

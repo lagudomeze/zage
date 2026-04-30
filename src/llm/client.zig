@@ -6,7 +6,6 @@ pub const provider = @import("provider.zig");
 pub const openai = @import("openai.zig");
 
 pub const ModelProvider = provider.ModelProvider;
-pub const LLMClient = provider.LLMClient; // backward-compatible alias
 pub const LLMError = provider.LLMError;
 pub const LLMResponse = provider.LLMResponse;
 pub const OpenAI = openai.OpenAI;
