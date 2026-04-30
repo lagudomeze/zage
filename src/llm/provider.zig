@@ -56,7 +56,7 @@ pub const ModelProvider = struct {
     }
 
     /// Call the underlying LLM.
-    /// Caller owns `LLMResponse.content` — free with the same allocator.
+    /// Caller owns heap-allocated response fields.
     pub fn complete(self: ModelProvider, allocator: std.mem.Allocator, messages: []const ChatMessage, opts: GenerationOptions) LLMError!LLMResponse {
         return self.vtable.complete(self.ptr, allocator, messages, opts);
     }

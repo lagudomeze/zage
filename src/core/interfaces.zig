@@ -110,7 +110,10 @@ test "assertIsModelProvider accepts valid implementation" {
             _ = a;
             _ = m;
             _ = o;
-            return LLMResponse{ .content = "", .finish_reason = .stop, .usage = null };
+            return LLMResponse{
+                .choices = &.{.{ .message = .{ .content = "" }, .finish_reason = .stop }},
+                .usage = null,
+            };
         }
     };
     comptime assertIsModelProvider(ValidProvider);

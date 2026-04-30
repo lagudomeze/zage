@@ -30,9 +30,9 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Sending request to {s} ...\n", .{openai.base_url});
 
     const response = try provider.complete(arena, &messages, .{ .max_tokens = 200 });
-    defer arena.free(response.content);
+    defer response.deinit(arena);
 
-    std.debug.print("\n--- Response ---\n{s}\n", .{response.content});
+    std.debug.print("\n--- Response ---\n{s}\n", .{response.text()});
 
     if (response.usage) |usage| {
         std.debug.print("\n--- Usage ---\n", .{});

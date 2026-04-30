@@ -86,10 +86,10 @@ test "integration - simple chat completion" {
     };
 
     const response = try provider.complete(allocator, &messages, .{ .max_tokens = 50 });
-    defer allocator.free(response.content);
+    defer response.deinit(allocator);
 
-    try std.testing.expect(response.content.len > 0);
-    try std.testing.expectEqual(FinishReason.stop, response.finish_reason);
+    try std.testing.expect(response.choices[0].message.content.len > 0);
+    try std.testing.expectEqual(FinishReason.stop, response.choices[0].finish_reason);
     try std.testing.expect(response.usage != null);
     try std.testing.expect(response.usage.?.total_tokens > 0);
 }
@@ -109,10 +109,10 @@ test "integration - system prompt influences response" {
     };
 
     const response = try provider.complete(allocator, &messages, .{ .max_tokens = 80 });
-    defer allocator.free(response.content);
+    defer response.deinit(allocator);
 
-    try std.testing.expect(response.content.len > 0);
-    try std.testing.expect(response.finish_reason == .stop or response.finish_reason == .length);
+    try std.testing.expect(response.choices[0].message.content.len > 0);
+    try std.testing.expect(response.choices[0].finish_reason == .stop or response.choices[0].finish_reason == .length);
 }
 
 test "integration - low temperature produces deterministic output" {
@@ -131,7 +131,7 @@ test "integration - low temperature produces deterministic output" {
         .temperature = 0.0,
         .max_tokens = 50,
     });
-    defer allocator.free(response.content);
+    defer response.deinit(allocator);
 
-    try std.testing.expect(response.content.len > 0);
+    try std.testing.expect(response.choices[0].message.content.len > 0);
 }

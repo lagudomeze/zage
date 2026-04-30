@@ -195,17 +195,10 @@ const ResponseBody = struct {
     usage: ?ResponseUsage = null,
 };
 
-/// Parse an OpenAI-compatible JSON response into an `LLMResponse` using serde.
+/// Parse a successful (HTTP 200) OpenAI response body into an `LLMResponse`.
+///
+/// HTTP error status codes are handled in `complete()` before calling this.
 pub fn parseResponse(allocator: std.mem.Allocator, body: []const u8) LLMError!LLMResponse {
-    // Check for error payload first.
-    if (std.json.parseFromSlice(struct { @"error": struct { message: []const u8 } }, allocator, body, .{ .ignore_unknown_fields = true })) |err_payload| {
-        defer err_payload.deinit();
-        std.log.warn("OpenAI API error: {s}", .{err_payload.value.@"error".message});
-        return LLMError.ApiError;
-    } else |_| {}
-
-    // Use an arena to manage all serde-allocated strings, then dupe only
-    // the content to the caller's allocator.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
@@ -216,12 +209,18 @@ pub fn parseResponse(allocator: std.mem.Allocator, body: []const u8) LLMError!LL
 
     if (parsed.choices.len == 0) return LLMError.UnexpectedResponse;
 
-    const choice = parsed.choices[0];
-    const content = allocator.dupe(u8, choice.message.content) catch return LLMError.ParseError;
+    // Duplicate the content from the arena to the caller's allocator.
+    var choices = allocator.alloc(LLMResponse.Choice, parsed.choices.len) catch return LLMError.ParseError;
+    for (parsed.choices, 0..) |c, i| {
+        const content = allocator.dupe(u8, c.message.content) catch return LLMError.ParseError;
+        choices[i] = .{
+            .message = .{ .content = content },
+            .finish_reason = parseFinishReason(c.finish_reason),
+        };
+    }
 
     return LLMResponse{
-        .content = content,
-        .finish_reason = parseFinishReason(choice.finish_reason),
+        .choices = choices,
         .usage = if (parsed.usage) |u| Usage{
             .prompt_tokens = u.prompt_tokens,
             .completion_tokens = u.completion_tokens,
@@ -318,10 +317,10 @@ test "parseResponse - valid response" {
     ;
 
     const resp = try parseResponse(allocator, body);
-    defer allocator.free(resp.content);
+    defer resp.deinit(allocator);
 
-    try std.testing.expectEqualStrings("Hello! How can I help?", resp.content);
-    try std.testing.expectEqual(FinishReason.stop, resp.finish_reason);
+    try std.testing.expectEqualStrings("Hello! How can I help?", resp.choices[0].message.content);
+    try std.testing.expectEqual(FinishReason.stop, resp.choices[0].finish_reason);
     try std.testing.expect(resp.usage != null);
     try std.testing.expectEqual(@as(u32, 10), resp.usage.?.prompt_tokens);
     try std.testing.expectEqual(@as(u32, 5), resp.usage.?.completion_tokens);
@@ -343,10 +342,10 @@ test "parseResponse - missing usage" {
     ;
 
     const resp = try parseResponse(allocator, body);
-    defer allocator.free(resp.content);
+    defer resp.deinit(allocator);
 
-    try std.testing.expectEqualStrings("Hi", resp.content);
-    try std.testing.expectEqual(FinishReason.length, resp.finish_reason);
+    try std.testing.expectEqualStrings("Hi", resp.choices[0].message.content);
+    try std.testing.expectEqual(FinishReason.length, resp.choices[0].finish_reason);
     try std.testing.expect(resp.usage == null);
 }
 
@@ -371,32 +370,32 @@ test "parseResponse - finish_reason mapping" {
             \\{"choices":[{"message":{"content":"x"},"finish_reason":"stop"}]}
         ;
         const resp = try parseResponse(allocator, body);
-        defer allocator.free(resp.content);
-        try std.testing.expectEqual(FinishReason.stop, resp.finish_reason);
+        defer resp.deinit(allocator);
+        try std.testing.expectEqual(FinishReason.stop, resp.choices[0].finish_reason);
     }
     {
         const body =
             \\{"choices":[{"message":{"content":"x"},"finish_reason":"tool_calls"}]}
         ;
         const resp = try parseResponse(allocator, body);
-        defer allocator.free(resp.content);
-        try std.testing.expectEqual(FinishReason.tool_calls, resp.finish_reason);
+        defer resp.deinit(allocator);
+        try std.testing.expectEqual(FinishReason.tool_calls, resp.choices[0].finish_reason);
     }
     {
         const body =
             \\{"choices":[{"message":{"content":"x"},"finish_reason":"content_filter"}]}
         ;
         const resp = try parseResponse(allocator, body);
-        defer allocator.free(resp.content);
-        try std.testing.expectEqual(FinishReason.content_filter, resp.finish_reason);
+        defer resp.deinit(allocator);
+        try std.testing.expectEqual(FinishReason.content_filter, resp.choices[0].finish_reason);
     }
     {
         const body =
             \\{"choices":[{"message":{"content":"x"},"finish_reason":"random_new"}]}
         ;
         const resp = try parseResponse(allocator, body);
-        defer allocator.free(resp.content);
-        try std.testing.expectEqual(FinishReason.unknown, resp.finish_reason);
+        defer resp.deinit(allocator);
+        try std.testing.expectEqual(FinishReason.unknown, resp.choices[0].finish_reason);
     }
 }
 

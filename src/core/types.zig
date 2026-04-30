@@ -62,11 +62,37 @@ pub const Usage = struct {
     total_tokens: u32,
 };
 
-/// The response returned by an LLM completion call.
+/// An LLM chat completion response, matching the OpenAI API format
+/// (the de facto standard across providers).
 pub const LLMResponse = struct {
-    content: []const u8,
-    finish_reason: FinishReason,
+    /// One entry per completion choice. Nearly always a single choice.
+    choices: []const Choice,
+    /// Token usage statistics (may be absent from some providers).
     usage: ?Usage,
+
+    pub const Choice = struct {
+        message: Message,
+        finish_reason: FinishReason,
+
+        pub const Message = struct {
+            /// The assistant's text response.
+            content: []const u8,
+        };
+    };
+
+    /// Convenience: the first choice's message content.
+    /// Panics at runtime if choices is empty.
+    pub fn text(self: LLMResponse) []const u8 {
+        return self.choices[0].message.content;
+    }
+
+    /// Free all memory owned by this response.
+    pub fn deinit(self: LLMResponse, allocator: std.mem.Allocator) void {
+        for (self.choices) |c| {
+            allocator.free(c.message.content);
+        }
+        allocator.free(self.choices);
+    }
 };
 
 /// Represents a tool call requested by the LLM.
@@ -123,8 +149,8 @@ pub const LLMClient = struct {
 
     /// Call the underlying LLM with the given messages and options.
     ///
-    /// The caller owns the returned `LLMResponse.content` and must free it
-    /// with the same allocator passed to this function.
+    /// The caller owns all heap-allocated fields in `LLMResponse` (notably
+    /// `choices[].message.content`) and must free them with the same allocator.
     pub fn complete(self: LLMClient, allocator: std.mem.Allocator, messages: []const ChatMessage, opts: GenerationOptions) LLMError!LLMResponse {
         return self.vtable.complete(self.ptr, allocator, messages, opts);
     }
