@@ -1,13 +1,17 @@
 //! LLM client abstraction.
 //!
-//! Re-exports the LLMClient interface from core types and provides
-//! concrete implementations (e.g. OpenAI).
+//! Re-exports the ModelProvider vtable interface and concrete implementations.
 
-pub const types = @import("../core/types.zig");
-pub const LLMClient = types.LLMClient;
-pub const LLMError = types.LLMError;
-pub const LLMResponse = types.LLMResponse;
+pub const provider = @import("provider.zig");
+pub const openai = @import("openai.zig");
+
+pub const ModelProvider = provider.ModelProvider;
+pub const LLMClient = provider.LLMClient; // backward-compatible alias
+pub const LLMError = provider.LLMError;
+pub const LLMResponse = provider.LLMResponse;
+pub const OpenAI = openai.OpenAI;
 
 test {
-    _ = types;
+    _ = provider;
+    _ = openai;
 }

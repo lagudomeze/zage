@@ -1,71 +1,43 @@
-const std = @import("std");
-const Io = std.Io;
+//! Zage — basic chat example.
+//!
+//! Usage:
+//!   OPENAI_API_KEY=sk-xxx zig build run
+//!
+//! Optionally set OPENAI_BASE_URL and OPENAI_MODEL for compatible services.
 
+const std = @import("std");
 const zage = @import("zage");
 
 pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+    const arena = init.arena.allocator();
 
-    // This is appropriate for anything that lives as long as the process.
-    const arena: std.mem.Allocator = init.arena.allocator();
-
-    // Accessing command line arguments:
-    const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
-    }
-
-    // In order to do I/O operations need an `Io` instance.
-    const io = init.io;
-
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
-
-    try zage.printAnotherMessage(stdout_writer);
-
-    try stdout_writer.flush(); // Don't forget to flush!
-}
-
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "fuzz example" {
-    try std.testing.fuzz({}, testOne, .{});
-}
-
-fn testOne(context: void, smith: *std.testing.Smith) !void {
-    _ = context;
-    // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(gpa);
-    while (!smith.eos()) switch (smith.value(enum { add_data, dup_data })) {
-        .add_data => {
-            const slice = try list.addManyAsSlice(gpa, smith.value(u4));
-            smith.bytes(slice);
-        },
-        .dup_data => {
-            if (list.items.len == 0) continue;
-            if (list.items.len > std.math.maxInt(u32)) return error.SkipZigTest;
-            const len = smith.valueRangeAtMost(u32, 1, @min(32, list.items.len));
-            const off = smith.valueRangeAtMost(u32, 0, @intCast(list.items.len - len));
-            try list.appendSlice(gpa, list.items[off..][0..len]);
-            try std.testing.expectEqualSlices(
-                u8,
-                list.items[off..][0..len],
-                list.items[list.items.len - len ..],
-            );
-        },
+    // Resolve config from environment (non-allocating lookup via environ_map).
+    const api_key = init.environ_map.get("OPENAI_API_KEY") orelse {
+        std.debug.print("Error: OPENAI_API_KEY environment variable is required.\n", .{});
+        std.process.exit(1);
     };
+    const model = init.environ_map.get("OPENAI_MODEL");
+    const base_url = init.environ_map.get("OPENAI_BASE_URL");
+
+    var openai = zage.llm.OpenAI.init(arena, init.io, api_key, model, base_url);
+    const provider = zage.llm.ModelProvider.init(&openai);
+
+    const messages = [_]zage.ChatMessage{
+        .{ .role = .system, .content = "You are a helpful assistant. Answer concisely." },
+        .{ .role = .user, .content = "Hello! Who are you, and what can you do?" },
+    };
+
+    std.debug.print("Sending request to {s} ...\n", .{openai.base_url});
+
+    const response = try provider.complete(arena, &messages, .{ .max_tokens = 200 });
+    defer arena.free(response.content);
+
+    std.debug.print("\n--- Response ---\n{s}\n", .{response.content});
+
+    if (response.usage) |usage| {
+        std.debug.print("\n--- Usage ---\n", .{});
+        std.debug.print("  prompt:     {d} tokens\n", .{usage.prompt_tokens});
+        std.debug.print("  completion: {d} tokens\n", .{usage.completion_tokens});
+        std.debug.print("  total:      {d} tokens\n", .{usage.total_tokens});
+    }
 }

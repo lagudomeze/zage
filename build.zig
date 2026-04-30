@@ -28,17 +28,17 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    const mod = b.addModule("zage", .{
-        // The root source file is the "entry point" of this module. Users of
-        // this module will only be able to access public declarations contained
-        // in this file, which means that if you have declarations that you
-        // intend to expose to consumers that were defined in other files part
-        // of this module, you will have to make sure to re-export them from
-        // the root file.
-        .root_source_file = b.path("src/root.zig"),
-        // Later on we'll use this module as the root module of a test executable
-        // which requires us to specify a target.
+    const serde_dep = b.dependency("serde", .{
         .target = target,
+        .optimize = optimize,
+    });
+
+    const mod = b.addModule("zage", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "serde", .module = serde_dep.module("serde") },
+        },
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -73,12 +73,8 @@ pub fn build(b: *std.Build) void {
             // List of modules available for import in source files part of the
             // root module.
             .imports = &.{
-                // Here "zage" is the name you will use in your source code to
-                // import this module (e.g. `@import("zage")`). The name is
-                // repeated because you are allowed to rename your imports, which
-                // can be extremely useful in case of collisions (which can happen
-                // importing modules from different packages).
                 .{ .name = "zage", .module = mod },
+                .{ .name = "serde", .module = serde_dep.module("serde") },
             },
         }),
     });
@@ -126,21 +122,42 @@ pub fn build(b: *std.Build) void {
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     // Creates an executable that will run `test` blocks from the executable's
-    // root module. Note that test executables only test one module at a time,
-    // hence why we have to create two separate ones.
+    // root module.
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
-
-    // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
-    // A top level step for running all tests. dependOn can be called multiple
-    // times and since the two run steps do not depend on one another, this will
-    // make the two of them run in parallel.
-    const test_step = b.step("test", "Run tests");
+    // A top level step for running unit tests (no API key needed).
+    const test_step = b.step("test", "Run unit tests (no network)");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // -----------------------------------------------------------------------
+    // Integration tests — read config JSON from project root.
+    // Copy .env.test.example.json to .env.test.json and fill in credentials.
+    // Usage:
+    //   zig build integration-test
+    //   zig build integration-test -Dconfig=.env.test.json
+    // -----------------------------------------------------------------------
+    const config_path = b.option([]const u8, "config", "Path to integration test config file") orelse ".env.test.json";
+
+    const integration_module = b.createModule(.{
+        .root_source_file = b.path("src/llm/openai_integration.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zage", .module = mod },
+        },
+    });
+    const integration_tests = b.addTest(.{
+        .root_module = integration_module,
+    });
+    const run_integration = b.addRunArtifact(integration_tests);
+    run_integration.setEnvironmentVariable("ZAGE_TEST_CONFIG", config_path);
+
+    const integration_step = b.step("integration-test", "Run integration tests (reads .env.test.json by default)");
+    integration_step.dependOn(&run_integration.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

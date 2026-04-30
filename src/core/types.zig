@@ -10,6 +10,7 @@ pub const ChatRole = enum {
     system,
     user,
     assistant,
+    tool,
 
     /// Returns the role name as expected by OpenAI-compatible APIs.
     pub fn asStr(self: ChatRole) []const u8 {
@@ -17,6 +18,7 @@ pub const ChatRole = enum {
             .system => "system",
             .user => "user",
             .assistant => "assistant",
+            .tool => "tool",
         };
     }
 };
@@ -25,6 +27,9 @@ pub const ChatRole = enum {
 pub const ChatMessage = struct {
     role: ChatRole,
     content: []const u8,
+    /// Required when `role` is `.tool`. Identifies which tool call this result
+    /// belongs to.
+    tool_call_id: ?[]const u8 = null,
 };
 
 /// Controls text generation behaviour.
@@ -64,6 +69,28 @@ pub const LLMResponse = struct {
     usage: ?Usage,
 };
 
+/// Represents a tool call requested by the LLM.
+pub const ToolCall = struct {
+    /// Unique identifier for this tool call (e.g. "call_abc123").
+    id: []const u8,
+    /// The name of the tool to invoke (e.g. "get_weather").
+    name: []const u8,
+    /// JSON-encoded arguments string (e.g. `{"city":"Beijing"}`).
+    arguments: []const u8,
+};
+
+/// A single step in an Agent loop (Thought → Action → Observation).
+pub const AgentStep = struct {
+    /// The model's reasoning before taking an action (optional).
+    thought: ?[]const u8 = null,
+    /// The tool call chosen by the model (optional, absent when the model
+    /// responds directly without invoking a tool).
+    action: ?ToolCall = null,
+    /// The result returned by the tool after execution (optional, absent
+    /// before the tool has been executed).
+    observation: ?[]const u8 = null,
+};
+
 /// Errors that can occur during LLM interactions.
 pub const LLMError = error{
     /// The HTTP request could not be sent or completed.
@@ -91,7 +118,7 @@ pub const LLMClient = struct {
 
     pub const VTable = struct {
         /// Send chat messages to the LLM and receive a completion.
-        complete: fn(*anyopaque, allocator: std.mem.Allocator, messages: []const ChatMessage, opts: GenerationOptions) LLMError!LLMResponse,
+        complete: *const fn (*anyopaque, allocator: std.mem.Allocator, messages: []const ChatMessage, opts: GenerationOptions) LLMError!LLMResponse,
     };
 
     /// Call the underlying LLM with the given messages and options.
@@ -107,6 +134,7 @@ test "ChatRole asStr returns correct strings" {
     try std.testing.expectEqualStrings("system", ChatRole.system.asStr());
     try std.testing.expectEqualStrings("user", ChatRole.user.asStr());
     try std.testing.expectEqualStrings("assistant", ChatRole.assistant.asStr());
+    try std.testing.expectEqualStrings("tool", ChatRole.tool.asStr());
 }
 
 test "GenerationOptions default values are null" {

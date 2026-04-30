@@ -1,15 +1,33 @@
 # Zage
 
-> An AI Agent framework in Zig — LangChain-inspired, systems-programming-powered.
+> An AI Agent framework in Zig — built for performance, inspired by OpenClaw, NullClaw, and SemaClaw.
 
 **Zage** (pronounced *zayj*) is a framework for building LLM-powered agent applications. It focuses on agent orchestration with the performance, memory control, and zero-dependency ethos of systems programming.
 
-## Design Goals
+## Design
 
-- **LangChain-like architecture** — chains, prompts, and LLM abstraction as first-class concepts
-- **Zero dependencies** — built entirely on the Zig standard library, no C libraries required
-- **Minimal overhead** — vtable-based polymorphism, arena-friendly allocation, no hidden allocations
-- **Zig 0.16+** — leverages the latest Zig toolchain and idioms
+Zage adopts a **4+1 layer architecture**:
+
+```
+Harness          — runtime safety boundary, lifecycle, event routing (Phase 2)
+  Session + Agent Loop — session state + ReAct cycle (Phase 1)
+    ModelProvider — vtable-backed LLM backends (runtime-switchable)
+    Tool          — comptime-checked tool interface
+    Memory        — vtable-backed memory backend
+```
+
+### Interface Strategy
+
+- **anytype duck typing** — internal hot paths, zero-cost static dispatch
+- **comptime checks** — public interfaces (Tool, AgentLoop), compile-time validation
+- **vtable dispatch** — runtime-switchable backends (ModelProvider, Memory)
+
+### Principles
+
+- **Zero dependencies** — built on the Zig standard library, no C libraries
+- **Minimal overhead** — arena-friendly allocation, no hidden allocations
+- **Zig 0.16+** — leverages latest Zig toolchain and idioms
+- **Simple first** — no Rust-style GAT/associated types, no unnecessary abstraction
 
 ## Project Status
 
@@ -17,25 +35,29 @@
 
 ### Roadmap
 
-- [x] Project skeleton & core types (`ChatRole`, `ChatMessage`, `LLMClient` interface)
-- [ ] OpenAI client (HTTPS + JSON via `std.http.Client`)
-- [ ] Prompt templating (`{variable}` interpolation)
-- [ ] Chain abstraction (`LLMChain` composing prompt + client)
-- [ ] Streaming responses
-- [ ] Tool use / function calling
-- [ ] Multi-agent orchestration
+- [x] Project skeleton & core types
+- [x] OpenAI client (JSON + unit tests)
+- [ ] Core interfaces (`ModelProvider`, `Tool`, `Memory`, `AgentLoop`)
+- [ ] Agent Loop (ReAct cycle) + Session management
+- [ ] Tool calling & Memory
+- [ ] Harness runtime
+- [ ] Multi-agent, streaming, production hardening
+
+See [doc/ROADMAP.md](doc/ROADMAP.md) for the detailed plan.
 
 ## Quick Start
 
-```zig
-const zage = @import("zage");
+Requirements: **Zig 0.16.0** or later.
 
-// Coming soon — see examples/basic_chat.zig
+```sh
+# Clone and test
+git clone https://github.com/your-org/zage.git
+cd zage
+zig build test
+
+# Run the basic chat example (requires API key)
+OPENAI_API_KEY=sk-xxx zig build run
 ```
-
-### Requirements
-
-- Zig 0.16.0 or later
 
 ## Installation
 
@@ -43,7 +65,7 @@ const zage = @import("zage");
 zig fetch --save https://github.com/your-org/zage/archive/main.tar.gz
 ```
 
-Then in your `build.zig.zon`:
+Then in `build.zig.zon`:
 
 ```zig
 .zage = .{
@@ -52,7 +74,7 @@ Then in your `build.zig.zon`:
 },
 ```
 
-And in your `build.zig`:
+And in `build.zig`:
 
 ```zig
 const zage = b.dependency("zage", .{}).module("zage");

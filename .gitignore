@@ -13,6 +13,13 @@ zig-out/
 .DS_Store
 Thumbs.db
 
+# Dependencies (fetched by zig fetch)
+zig-pkg/
+
+# Claude Code personal data
+.claude/memory/
+
 # Environment
 .env
 .env.local
+.env.test.json
