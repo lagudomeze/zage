@@ -13,7 +13,7 @@ Invoke this skill before creating any git commit. It ensures every commit follow
 
 ### Message Format
 
-```
+```text
 <type>(<scope>): <concise title>
 
 <detailed body — what changed and why>
@@ -24,7 +24,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 ### Types
 
 | Type | Usage |
-|------|-------|
+| ------ | ------- |
 | `feat` | New feature or capability |
 | `fix` | Bug fix |
 | `refactor` | Code restructuring, no behavior change |
@@ -49,7 +49,8 @@ Use the module or area affected: `core`, `llm`, `prompt`, `agent`, `memory`, `to
 ### Examples
 
 Good:
-```
+
+```text
 feat(llm): add OpenAI client with serde JSON serialization
 
 Replace hand-written JSON parsing with serde library for robust
@@ -60,10 +61,12 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 ```
 
 Bad:
-```
+
+```text
 update stuff
 ```
-```
+
+```text
 fixed bug
 ```
 
@@ -88,6 +91,7 @@ fixed bug
 ## Co-Authored-By
 
 Every commit must include:
-```
+
+```text
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 ```
