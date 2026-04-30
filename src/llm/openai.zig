@@ -76,6 +76,7 @@ pub const OpenAI = struct {
         };
 
         const body = try self.doPost(allocator, "/v1/chat/completions", payload);
+        defer allocator.free(body);
         return parseResponse(allocator, body);
     }
 
@@ -86,6 +87,7 @@ pub const OpenAI = struct {
         request: EmbeddingRequest,
     ) LLMError!EmbeddingResponse {
         const body = try self.doPost(allocator, "/v1/embeddings", request);
+        defer allocator.free(body);
         return parseEmbeddingResponse(allocator, body);
     }
 
@@ -95,6 +97,7 @@ pub const OpenAI = struct {
         allocator: std.mem.Allocator,
     ) LLMError!ModelList {
         const body = try self.doGet(allocator, "/v1/models");
+        defer allocator.free(body);
         return parseModelList(allocator, body);
     }
 
@@ -102,14 +105,15 @@ pub const OpenAI = struct {
 
     fn doPost(self: *const OpenAI, allocator: std.mem.Allocator, path: []const u8, payload: anytype) LLMError![]u8 {
         const uri = buildUri(self.base_url, path) catch return LLMError.InvalidInput;
-        const auth = buildAuthHeader(self.api_key) catch return LLMError.InvalidInput;
+        var auth_buf: [512]u8 = undefined;
+        const auth = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{self.api_key}) catch return LLMError.InvalidInput;
 
         var http: std.http.Client = .{ .allocator = allocator, .io = self.io };
         defer http.deinit();
 
         var req = http.request(.POST, uri, .{
             .headers = .{
-                .authorization = .{ .override = &auth },
+                .authorization = .{ .override = auth },
                 .content_type = .{ .override = "application/json" },
             },
         }) catch return LLMError.NetworkError;
@@ -122,62 +126,55 @@ pub const OpenAI = struct {
         bw.end() catch return LLMError.NetworkError;
         req.connection.?.flush() catch return LLMError.NetworkError;
 
-        return self.receiveResponse(allocator, &req);
+        return self.receive(allocator, &req);
     }
 
     fn doGet(self: *const OpenAI, allocator: std.mem.Allocator, path: []const u8) LLMError![]u8 {
         const uri = buildUri(self.base_url, path) catch return LLMError.InvalidInput;
-        const auth = buildAuthHeader(self.api_key) catch return LLMError.InvalidInput;
+        var auth_buf: [512]u8 = undefined;
+        const auth = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{self.api_key}) catch return LLMError.InvalidInput;
 
         var http: std.http.Client = .{ .allocator = allocator, .io = self.io };
         defer http.deinit();
 
         var req = http.request(.GET, uri, .{
-            .headers = .{ .authorization = .{ .override = &auth } },
+            .headers = .{ .authorization = .{ .override = auth } },
         }) catch return LLMError.NetworkError;
         defer req.deinit();
 
         req.sendBodiless() catch return LLMError.NetworkError;
 
-        return self.receiveResponse(allocator, &req);
+        return self.receive(allocator, &req);
     }
 
-    fn receiveResponse(_: *const OpenAI, allocator: std.mem.Allocator, req: *std.http.Client.Request) LLMError![]u8 {
+    fn receive(_: *const OpenAI, allocator: std.mem.Allocator, req: *std.http.Client.Request) LLMError![]u8 {
         var redirect_buf: [4096]u8 = undefined;
         var response = req.receiveHead(&redirect_buf) catch return LLMError.NetworkError;
+        try checkHttpStatus(&response);
 
-        if (response.head.status != .ok) {
-            var err_buf: [4096]u8 = undefined;
-            var transfer_buf: [1024]u8 = undefined;
-            const err_len = response.reader(&transfer_buf).readSliceShort(&err_buf) catch 0;
-            std.log.warn("OpenAI HTTP {s}: {s}", .{ @tagName(response.head.status), err_buf[0..err_len] });
-            return switch (response.head.status) {
-                .unauthorized, .forbidden => LLMError.ApiError,
-                .too_many_requests => LLMError.ApiError,
-                .bad_request => LLMError.InvalidInput,
-                else => LLMError.HttpError,
-            };
-        }
-
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
         var transfer_buf: [4096]u8 = undefined;
-        return response.reader(&transfer_buf).allocRemaining(arena.allocator(), @enumFromInt(64 * 1024)) catch return LLMError.NetworkError;
+        return response.reader(&transfer_buf).allocRemaining(allocator, @enumFromInt(64 * 1024)) catch return LLMError.NetworkError;
     }
 };
 
-// -- standalone helpers -------------------------------------------------------
+fn checkHttpStatus(response: *std.http.Client.Response) LLMError!void {
+    if (response.head.status == .ok) return;
+    var err_buf: [4096]u8 = undefined;
+    var tbuf: [1024]u8 = undefined;
+    const err_len = response.reader(&tbuf).readSliceShort(&err_buf) catch 0;
+    std.log.warn("OpenAI HTTP {s}: {s}", .{ @tagName(response.head.status), err_buf[0..err_len] });
+    return switch (response.head.status) {
+        .unauthorized, .forbidden => LLMError.ApiError,
+        .too_many_requests => LLMError.ApiError,
+        .bad_request => LLMError.InvalidInput,
+        else => LLMError.HttpError,
+    };
+}
 
 fn buildUri(base_url: []const u8, path: []const u8) !std.Uri {
     var url_buf: [2048]u8 = undefined;
     const endpoint = try std.fmt.bufPrint(&url_buf, "{s}{s}", .{ base_url, path });
     return std.Uri.parse(endpoint);
-}
-
-fn buildAuthHeader(api_key: []const u8) ![512]u8 {
-    var auth_buf: [512]u8 = undefined;
-    _ = try std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{api_key});
-    return auth_buf;
 }
 
 // ---------------------------------------------------------------------------
