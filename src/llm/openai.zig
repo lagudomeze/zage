@@ -13,6 +13,11 @@ const ChatRole = core.ChatRole;
 const GenerationOptions = core.GenerationOptions;
 const FinishReason = core.FinishReason;
 const Usage = core.Usage;
+const ToolCall = core.ToolCall;
+const ToolDef = core.ToolDef;
+const EmbeddingRequest = core.EmbeddingRequest;
+const EmbeddingResponse = core.EmbeddingResponse;
+const ModelList = core.ModelList;
 const LLMResponse = core.LLMResponse;
 const LLMError = core.LLMError;
 
@@ -122,6 +127,30 @@ pub const OpenAI = struct {
 
         return parseResponse(allocator, body_bytes);
     }
+
+    /// Create an embedding vector for the given input text.
+    /// Uses the `/v1/embeddings` endpoint.
+    pub fn createEmbedding(
+        self: *OpenAI,
+        allocator: std.mem.Allocator,
+        request: EmbeddingRequest,
+    ) LLMError!EmbeddingResponse {
+        _ = self;
+        _ = allocator;
+        _ = request;
+        return error.ApiError; // TODO: implement
+    }
+
+    /// List all available models.
+    /// Uses the `/v1/models` endpoint.
+    pub fn listModels(
+        self: *OpenAI,
+        allocator: std.mem.Allocator,
+    ) LLMError!ModelList {
+        _ = self;
+        _ = allocator;
+        return error.ApiError; // TODO: implement
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -162,12 +191,28 @@ pub fn buildRequestBody(
 // JSON response parsing
 // ---------------------------------------------------------------------------
 
-/// Matches the OpenAI chat completions response shape.
-/// `std.json.Parsed` manages an internal arena — no scratch allocator needed.
+/// Matches the OpenAI chat completions response JSON.
 const ResponseBody = struct {
+    id: []const u8,
+    object: []const u8,
+    created: u64,
+    model: []const u8,
+    system_fingerprint: ?[]const u8 = null,
+    service_tier: ?[]const u8 = null,
     choices: []struct {
+        index: u32 = 0,
         message: struct {
+            role: []const u8,
             content: []const u8,
+            tool_calls: ?[]struct {
+                id: []const u8,
+                @"type": []const u8,
+                function: struct {
+                    name: []const u8,
+                    arguments: []const u8,
+                },
+            } = null,
+            refusal: ?[]const u8 = null,
         },
         finish_reason: []const u8 = "stop",
     },
@@ -179,30 +224,57 @@ const ResponseBody = struct {
 };
 
 /// Parse a successful (HTTP 200) OpenAI response body into an `LLMResponse`.
-///
-/// Uses `std.json.Parsed` for internal arena management — only the returned
-/// fields are duped to `allocator`. The caller owns the result.
 pub fn parseResponse(allocator: std.mem.Allocator, body: []const u8) LLMError!LLMResponse {
     var parsed = std.json.parseFromSlice(ResponseBody, allocator, body, .{ .ignore_unknown_fields = true }) catch {
         return LLMError.ParseError;
     };
     defer parsed.deinit();
 
-    const choices = parsed.value.choices;
-    if (choices.len == 0) return LLMError.UnexpectedResponse;
+    const v = parsed.value;
+    if (v.choices.len == 0) return LLMError.UnexpectedResponse;
 
-    var result_choices = allocator.alloc(LLMResponse.Choice, choices.len) catch return LLMError.ParseError;
-    for (choices, 0..) |c, i| {
+    var result_choices = allocator.alloc(LLMResponse.Choice, v.choices.len) catch return LLMError.ParseError;
+    for (v.choices, 0..) |c, i| {
         const content = allocator.dupe(u8, c.message.content) catch return LLMError.ParseError;
+        const role = allocator.dupe(u8, c.message.role) catch return LLMError.ParseError;
+
+        var tool_calls: ?[]const ToolCall = null;
+        if (c.message.tool_calls) |tcs| {
+            var result_tcs = allocator.alloc(ToolCall, tcs.len) catch return LLMError.ParseError;
+            for (tcs, 0..) |tc, j| {
+                result_tcs[j] = .{
+                    .id = allocator.dupe(u8, tc.id) catch return LLMError.ParseError,
+                    .@"type" = allocator.dupe(u8, tc.@"type") catch return LLMError.ParseError,
+                    .function = .{
+                        .name = allocator.dupe(u8, tc.function.name) catch return LLMError.ParseError,
+                        .arguments = allocator.dupe(u8, tc.function.arguments) catch return LLMError.ParseError,
+                    },
+                };
+            }
+            tool_calls = result_tcs;
+        }
+
         result_choices[i] = .{
-            .message = .{ .content = content },
+            .index = c.index,
+            .message = .{
+                .role = role,
+                .content = content,
+                .tool_calls = tool_calls,
+                .refusal = if (c.message.refusal) |r| allocator.dupe(u8, r) catch return LLMError.ParseError else null,
+            },
             .finish_reason = parseFinishReason(c.finish_reason),
         };
     }
 
     return LLMResponse{
+        .id = allocator.dupe(u8, v.id) catch return LLMError.ParseError,
+        .object = allocator.dupe(u8, v.object) catch return LLMError.ParseError,
+        .created = v.created,
+        .model = allocator.dupe(u8, v.model) catch return LLMError.ParseError,
+        .system_fingerprint = if (v.system_fingerprint) |s| allocator.dupe(u8, s) catch return LLMError.ParseError else null,
+        .service_tier = if (v.service_tier) |s| allocator.dupe(u8, s) catch return LLMError.ParseError else null,
         .choices = result_choices,
-        .usage = if (parsed.value.usage) |u| Usage{
+        .usage = if (v.usage) |u| Usage{
             .prompt_tokens = u.prompt_tokens,
             .completion_tokens = u.completion_tokens,
             .total_tokens = u.total_tokens,
@@ -215,6 +287,7 @@ fn parseFinishReason(raw: []const u8) FinishReason {
     if (std.mem.eql(u8, raw, "length")) return .length;
     if (std.mem.eql(u8, raw, "content_filter")) return .content_filter;
     if (std.mem.eql(u8, raw, "tool_calls")) return .tool_calls;
+    if (std.mem.eql(u8, raw, "refusal")) return .refusal;
     return .unknown;
 }
 
@@ -310,9 +383,12 @@ test "parseResponse - missing usage" {
     const body =
         \\{
         \\  "id": "chatcmpl-xxx",
+        \\  "object": "chat.completion",
+        \\  "created": 1,
+        \\  "model": "gpt-4o",
         \\  "choices": [
         \\    {
-        \\      "message": { "content": "Hi" },
+        \\      "message": { "role": "assistant", "content": "Hi" },
         \\      "finish_reason": "length"
         \\    }
         \\  ]
@@ -329,7 +405,9 @@ test "parseResponse - missing usage" {
 
 test "parseResponse - empty choices" {
     const allocator = std.testing.allocator;
-    try std.testing.expectError(LLMError.UnexpectedResponse, parseResponse(allocator, "{\"choices\":[]}"));
+    try std.testing.expectError(LLMError.UnexpectedResponse, parseResponse(allocator,
+        \\{"id":"x","object":"chat.completion","created":1,"model":"x","choices":[]}
+    ));
 }
 
 test "parseResponse - invalid JSON" {
@@ -341,25 +419,25 @@ test "parseResponse - finish_reason mapping" {
     const allocator = std.testing.allocator;
 
     {
-        const body = "{\"choices\":[{\"message\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}";
+        const body = "{\"id\":\"x\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"x\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"x\"},\"finish_reason\":\"stop\"}]}";
         const resp = try parseResponse(allocator, body);
         defer resp.deinit(allocator);
         try std.testing.expectEqual(FinishReason.stop, resp.choices[0].finish_reason);
     }
     {
-        const body = "{\"choices\":[{\"message\":{\"content\":\"x\"},\"finish_reason\":\"tool_calls\"}]}";
+        const body = "{\"id\":\"x\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"x\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"x\"},\"finish_reason\":\"tool_calls\"}]}";
         const resp = try parseResponse(allocator, body);
         defer resp.deinit(allocator);
         try std.testing.expectEqual(FinishReason.tool_calls, resp.choices[0].finish_reason);
     }
     {
-        const body = "{\"choices\":[{\"message\":{\"content\":\"x\"},\"finish_reason\":\"content_filter\"}]}";
+        const body = "{\"id\":\"x\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"x\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"x\"},\"finish_reason\":\"content_filter\"}]}";
         const resp = try parseResponse(allocator, body);
         defer resp.deinit(allocator);
         try std.testing.expectEqual(FinishReason.content_filter, resp.choices[0].finish_reason);
     }
     {
-        const body = "{\"choices\":[{\"message\":{\"content\":\"x\"},\"finish_reason\":\"random_new\"}]}";
+        const body = "{\"id\":\"x\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"x\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"x\"},\"finish_reason\":\"random_new\"}]}";
         const resp = try parseResponse(allocator, body);
         defer resp.deinit(allocator);
         try std.testing.expectEqual(FinishReason.unknown, resp.choices[0].finish_reason);
