@@ -1,5 +1,5 @@
 ---
-name: commit
+name: git-commit
 description: Create well-structured git commits with conventional commit messages
 ---
 
