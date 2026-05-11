@@ -25,14 +25,9 @@ pub const FinishReason = core.FinishReason;
 pub const Usage = core.Usage;
 pub const LLMResponse = core.LLMResponse;
 pub const LLMError = core.LLMError;
-pub const EmbeddingRequest = core.EmbeddingRequest;
-pub const EmbeddingResponse = core.EmbeddingResponse;
-pub const ModelList = core.ModelList;
-pub const ModelProvider = llm.ModelProvider;
 pub const OpenAI = llm.OpenAI;
 
 // Interface validation helpers.
-pub const assertIsModelProvider = interfaces.assertIsModelProvider;
 pub const assertIsTool = interfaces.assertIsTool;
 pub const assertIsMemory = interfaces.assertIsMemory;
 pub const assertIsAgentLoop = interfaces.assertIsAgentLoop;

@@ -21,16 +21,17 @@ pub fn build(b: *std.Build) void {
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
-    // This creates a module, which represents a collection of source files alongside
-    // some compilation options, such as optimization mode and linked system libraries.
-    // Zig modules are the preferred way of making Zig code available to consumers.
-    // addModule defines a module that we intend to make available for importing
-    // to our consumers. We must give it a name because a Zig package can expose
-    // multiple modules and consumers will need to be able to specify which
-    // module they want to access.
+    // Build-time options exposed to source via `@import("build_options")`.
+    const test_integration = b.option(bool, "test-integration", "Run integration tests (needs .env.test.json)") orelse false;
+    const opts = b.addOptions();
+    opts.addOption(bool, "test_integration", test_integration);
+
     const mod = b.addModule("zage", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "build_options", .module = opts.createModule() },
+        },
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -125,30 +126,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
 
     // -----------------------------------------------------------------------
-    // Integration tests — read config JSON from project root.
-    // Copy .env.test.example.json to .env.test.json and fill in credentials.
-    // Usage:
-    //   zig build integration-test
-    //   zig build integration-test -Dconfig=.env.test.json
+    // Integration tests — run with:
+    //   zig build test -Dtest-integration=true
+    // Place .env.test.json (see .env.test.example.json) in the project root.
     // -----------------------------------------------------------------------
-    const config_path = b.option([]const u8, "config", "Path to integration test config file") orelse ".env.test.json";
-
-    const integration_module = b.createModule(.{
-        .root_source_file = b.path("src/llm/openai_integration.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "zage", .module = mod },
-        },
-    });
-    const integration_tests = b.addTest(.{
-        .root_module = integration_module,
-    });
-    const run_integration = b.addRunArtifact(integration_tests);
-    run_integration.setEnvironmentVariable("ZAGE_TEST_CONFIG", config_path);
-
-    const integration_step = b.step("integration-test", "Run integration tests (reads .env.test.json by default)");
-    integration_step.dependOn(&run_integration.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

@@ -11,7 +11,6 @@ const zage = @import("zage");
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
 
-    // Resolve config from environment (non-allocating lookup via environ_map).
     const api_key = init.environ_map.get("OPENAI_API_KEY") orelse {
         std.debug.print("Error: OPENAI_API_KEY environment variable is required.\n", .{});
         std.process.exit(1);
@@ -20,7 +19,6 @@ pub fn main(init: std.process.Init) !void {
     const base_url = init.environ_map.get("OPENAI_BASE_URL");
 
     var openai = zage.llm.OpenAI.init(arena, init.io, api_key, model, base_url);
-    const provider = zage.llm.ModelProvider.init(&openai);
 
     const messages = [_]zage.ChatMessage{
         .{ .role = .system, .content = "You are a helpful assistant. Answer concisely." },
@@ -29,8 +27,9 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("Sending request to {s} ...\n", .{openai.base_url});
 
-    const response = try provider.complete(arena, &messages, .{ .max_tokens = 200 });
-    defer response.deinit(arena);
+    const parsed = try openai.complete(arena, &messages, .{ .max_tokens = 200 });
+    defer parsed.deinit();
+    const response = parsed.value;
 
     std.debug.print("\n--- Response ---\n{s}\n", .{response.text()});
 

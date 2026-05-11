@@ -1,16 +1,9 @@
-//! LLM client abstraction.
-//!
-//! Re-exports the ModelProvider vtable interface and concrete implementations.
+//! LLM client — re-exports the OpenAI client.
 
-pub const provider = @import("provider.zig");
-pub const openai = @import("openai.zig");
-
-pub const ModelProvider = provider.ModelProvider;
-pub const LLMError = provider.LLMError;
-pub const LLMResponse = provider.LLMResponse;
+pub const openai = @import("openai/root.zig");
 pub const OpenAI = openai.OpenAI;
+pub const Ep = openai.Ep;
 
 test {
-    _ = provider;
     _ = openai;
 }

@@ -4,38 +4,13 @@
 //! compile time. This is Tier 2 of the interface strategy (comptime checks),
 //! used for types that users implement directly.
 //!
-//! For Tier 3 (runtime polymorphism), see `src/llm/provider.zig` for the
-//! ModelProvider vtable and `src/memory/buffer.zig` for the Memory vtable.
+//! LLM backends now use the comptime API pattern (see `api.zig`) — no vtable.
 
 const std = @import("std");
 const types = @import("types.zig");
 
 const ChatMessage = types.ChatMessage;
-const GenerationOptions = types.GenerationOptions;
-const LLMResponse = types.LLMResponse;
-const LLMError = types.LLMError;
 const AgentStep = types.AgentStep;
-
-// ---------------------------------------------------------------------------
-// ModelProvider — LLM backend interface
-// ---------------------------------------------------------------------------
-
-/// Validates that `T` satisfies the ModelProvider interface.
-///
-/// An implementation must provide:
-/// - `complete(allocator, messages, opts) LLMError!LLMResponse`
-pub fn assertIsModelProvider(comptime T: type) void {
-    if (!@hasDecl(T, "complete")) {
-        @compileError(@typeName(T) ++ " must declare a `complete` method");
-    }
-
-    // Validate complete function signature.
-    const CompleteFn = @TypeOf(T.complete);
-    const fn_info = @typeInfo(CompleteFn).@"fn";
-    if (fn_info.params.len < 3) {
-        @compileError(@typeName(T) ++ ".complete must accept at least 3 parameters: (self, allocator, messages, opts)");
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tool — executable tool interface
@@ -103,21 +78,6 @@ pub fn assertIsAgentLoop(comptime T: type) void {
 // ---------------------------------------------------------------------------
 // Compile-time verification tests
 // ---------------------------------------------------------------------------
-
-test "assertIsModelProvider accepts valid implementation" {
-    const ValidProvider = struct {
-        pub fn complete(_: @This(), a: std.mem.Allocator, m: []const ChatMessage, o: GenerationOptions) LLMError!LLMResponse {
-            _ = a;
-            _ = m;
-            _ = o;
-            return LLMResponse{
-                .choices = &.{.{ .message = .{ .content = "" }, .finish_reason = .stop }},
-                .usage = null,
-            };
-        }
-    };
-    comptime assertIsModelProvider(ValidProvider);
-}
 
 test "assertIsTool accepts valid implementation" {
     const ValidTool = struct {
